@@ -1,6 +1,8 @@
 """Тесты сессии на моке голосового клиента: без Discord, FFmpeg и реальных пауз."""
 
 import asyncio
+import logging
+import random
 from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -8,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from bot.config import ConfigReloader
+from bot.selector import SoundSelector
 from bot.session import MAX_FAILURES_IN_ROW, PlaybackError, SessionManager
 
 GUILD = SimpleNamespace(id=1, name="test")
@@ -65,16 +68,21 @@ def sounds_dir(tmp_path):
     return d
 
 
-def make_reloader(tmp_path, pause_min=1, pause_max=10):
+def make_reloader(tmp_path, pause_min=1, pause_max=10, extra=""):
     path = tmp_path / "config.toml"
-    path.write_text(f"[playback]\npause_min = {pause_min}\npause_max = {pause_max}\n", encoding="utf-8")
+    path.write_text(
+        f"[playback]\npause_min = {pause_min}\npause_max = {pause_max}\n{extra}", encoding="utf-8"
+    )
     reloader = ConfigReloader(path)
     reloader.load()
     return reloader
 
 
-def make_manager(sounds_dir, recorder):
-    return SessionManager(sounds_dir=sounds_dir, player=recorder.player, sleep=recorder.sleep)
+def make_manager(sounds_dir, recorder, seed=None):
+    factory = SoundSelector if seed is None else (lambda: SoundSelector(random.Random(seed)))
+    return SessionManager(
+        sounds_dir=sounds_dir, player=recorder.player, sleep=recorder.sleep, selector_factory=factory
+    )
 
 
 async def wait_until(condition, limit=100_000):
@@ -193,12 +201,14 @@ def test_ends_after_failures_in_row(tmp_path, sounds_dir):
 
 def test_failures_counter_resets_after_success(tmp_path, sounds_dir):
     # Падает всё, кроме a.ogg: подряд 5 ошибок почти наверняка случатся,
-    # но только если между ними не было успешного звука
+    # но только если между ними не было успешного звука.
+    # window = 1 снимает ограничение повторов: с ним при 3 звуках 5 «плохих» подряд невозможны
     rec = Recorder(fail=lambda path: path.name != "a.ogg")
 
     async def scenario():
         manager = make_manager(sounds_dir, rec)
-        task = manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path))
+        reloader = make_reloader(tmp_path, extra="[selection]\nwindow = 1\n")
+        task = manager.start(GUILD, FakeVoiceClient(), reloader)
         await asyncio.wait_for(task, timeout=5)
 
     asyncio.run(scenario())
@@ -269,3 +279,81 @@ def test_ends_when_disconnected(tmp_path, sounds_dir):
         assert not manager.is_running(GUILD.id)
 
     asyncio.run(scenario())
+
+
+def test_selector_state_survives_between_sessions(tmp_path, sounds_dir):
+    # 2 звука, after_play = 0: только что сыгравший звук имеет вес 0, поэтому звуки
+    # чередуются — в том числе на стыке сессий, если состояние сохранилось.
+    # С новым селектором на каждом из 5 стыков повтор был бы с вероятностью 1/2.
+    (sounds_dir / "c.wav").unlink()
+    extra = "[selection]\nafter_play = 0\n"
+    sessions = [Recorder() for _ in range(6)]
+
+    async def scenario():
+        manager = make_manager(sounds_dir, sessions[0], seed=1)
+        selector = manager.selector(GUILD.id)
+        for rec in sessions:
+            manager._player, manager._sleep = rec.player, rec.sleep
+            manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path, extra=extra))
+            await wait_until(lambda: len(rec.played) >= 3)
+            await manager.stop(GUILD.id)
+            assert manager.selector(GUILD.id) is selector
+
+    asyncio.run(scenario())
+    combined = [name for rec in sessions for name in rec.played]
+    assert all(x != y for x, y in zip(combined, combined[1:])), combined
+
+
+def test_selectors_are_per_guild(sounds_dir):
+    manager = SessionManager(sounds_dir=sounds_dir)
+    assert manager.selector(1) is manager.selector(1)
+    assert manager.selector(1) is not manager.selector(2)
+
+
+def test_play_log_contains_chance_and_window(tmp_path, sounds_dir, caplog):
+    rec = Recorder()
+
+    async def scenario():
+        manager = make_manager(sounds_dir, rec, seed=3)
+        manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path))
+        await wait_until(lambda: len(rec.played) >= 3)
+        await manager.stop(GUILD.id)
+
+    with caplog.at_level(logging.DEBUG, logger="bot.session"):
+        asyncio.run(scenario())
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("[1] играю" in m and "(шанс 33%, звуков в папке: 3)" in m for m in messages), messages
+    # 3 звука: W = (3 − 2) × 2 + 1 = 3 < window 10; пишется один раз, а не перед каждым звуком
+    assert sum("окно повторов сужено с 10 до 3" in m for m in messages) == 1
+    assert any("разрешён" in m and "a.ogg" in m for m in messages), "нет отладочной таблицы"
+
+
+def test_unknown_weight_warned_once(tmp_path, sounds_dir, caplog):
+    rec = Recorder()
+    extra = '[weights]\n"missing.ogg" = 2\n"A.OGG" = 0.5\n'
+
+    async def scenario():
+        manager = make_manager(sounds_dir, rec, seed=4)
+        manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path, extra=extra))
+        await wait_until(lambda: len(rec.played) >= 10)
+        await manager.stop(GUILD.id)
+
+    with caplog.at_level(logging.WARNING, logger="bot.session"):
+        asyncio.run(scenario())
+    warnings = [r.getMessage() for r in caplog.records if "[weights]" in r.getMessage()]
+    assert len(warnings) == 1
+    # A.OGG совпадает с a.ogg без учёта регистра
+    assert "missing.ogg" in warnings[0] and "A.OGG" not in warnings[0]
+
+
+def test_ends_when_all_weights_zero(tmp_path, sounds_dir):
+    rec = Recorder()
+    extra = '[weights]\n"a.ogg" = 0\n"b.mp3" = 0\n"c.wav" = 0\n'
+
+    async def scenario():
+        manager = make_manager(sounds_dir, rec)
+        task = manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path, extra=extra))
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(scenario())
+    assert rec.played == []
