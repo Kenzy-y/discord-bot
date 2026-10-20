@@ -1,0 +1,17 @@
+# Секреты
+.env
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE / ОС
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
