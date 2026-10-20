@@ -2,15 +2,18 @@
 
 Каждая секция конфига — отдельный dataclass с методом from_table.
 Чтобы добавить новую секцию: описать dataclass, добавить поле в Config
-и строчку в load_config.
+и строчку в parse_config. Неизвестные секции и параметры игнорируются.
 """
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 class ConfigError(Exception):
@@ -66,25 +69,15 @@ class _Reader:
 class PlaybackConfig:
     pause_min: float
     pause_max: float
-    plays_min: int
-    plays_max: int
 
     @classmethod
     def from_table(cls, table: dict[str, Any]) -> PlaybackConfig:
         r = _Reader("playback", table)
         pause_min = r.number("pause_min")
         pause_max = r.number("pause_max")
-        plays_min = r.number("plays_min", integer=True, minimum=1)
-        plays_max = r.number("plays_max", integer=True, minimum=1)
         r.range("pause_min", "pause_max", pause_min, pause_max)
-        r.range("plays_min", "plays_max", plays_min, plays_max)
         r.raise_if_errors()
-        return cls(
-            pause_min=float(pause_min),
-            pause_max=float(pause_max),
-            plays_min=plays_min,
-            plays_max=plays_max,
-        )
+        return cls(pause_min=float(pause_min), pause_max=float(pause_max))
 
 
 @dataclass(frozen=True)
@@ -92,17 +85,72 @@ class Config:
     playback: PlaybackConfig
 
 
-def load_config(path: Path) -> Config:
+def _read_bytes(path: Path) -> bytes:
     try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
+        return path.read_bytes()
     except FileNotFoundError:
         raise ConfigError(f"файл {path.name} не найден") from None
-    except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"синтаксическая ошибка в {path.name}: {e}") from None
     except OSError as e:
         raise ConfigError(f"не удалось прочитать {path.name}: {e}") from None
+
+
+def parse_config(raw: bytes, name: str = "config.toml") -> Config:
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ConfigError(f"{name} должен быть в кодировке UTF-8") from None
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"синтаксическая ошибка в {name}: {e}") from None
 
     return Config(
         playback=PlaybackConfig.from_table(_get_table(data, "playback")),
     )
+
+
+def load_config(path: Path) -> Config:
+    return parse_config(_read_bytes(path), path.name)
+
+
+class ConfigReloader:
+    """Перечитывает конфиг по ходу сессии.
+
+    Если файл стал некорректным, остаются последние корректные значения,
+    а предупреждение пишется в лог один раз на каждое изменение файла.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._raw: bytes | None = None
+        self._config: Config | None = None
+
+    def load(self) -> Config:
+        """Первая загрузка: при ошибке бросает ConfigError."""
+        raw = _read_bytes(self.path)
+        self._config = parse_config(raw, self.path.name)
+        self._raw = raw
+        return self._config
+
+    def get(self) -> Config:
+        """Актуальный корректный конфиг. Не бросает исключений после успешного load()."""
+        assert self._config is not None, "сначала нужно вызвать load()"
+        try:
+            raw: bytes | None = _read_bytes(self.path)
+            error: ConfigError | None = None
+        except ConfigError as e:
+            raw, error = None, e
+        if raw == self._raw:
+            return self._config
+        self._raw = raw
+
+        if raw is not None:
+            try:
+                config = parse_config(raw, self.path.name)
+            except ConfigError as e:
+                error = e
+            else:
+                if config != self._config:
+                    log.info("%s перечитан: %s", self.path.name, config)
+                self._config = config
+                return config
+        log.warning("Ошибка в %s, продолжаю с прежними настройками: %s", self.path.name, error)
+        return self._config

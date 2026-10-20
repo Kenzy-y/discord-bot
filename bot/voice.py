@@ -32,9 +32,11 @@ def _is_full(channel: discord.VoiceChannel, me: discord.Member) -> bool:
 def pick_random_channel(guild: discord.Guild) -> discord.VoiceChannel | None:
     me = guild.me
     afk_id = guild.afk_channel.id if guild.afk_channel else None
+    # Только обычные голосовые каналы: stage-каналы не поддерживаются
     candidates = [
         ch for ch in guild.voice_channels
-        if ch.id != afk_id and not _missing_permissions(ch, me) and not _is_full(ch, me)
+        if isinstance(ch, discord.VoiceChannel)
+        and ch.id != afk_id and not _missing_permissions(ch, me) and not _is_full(ch, me)
     ]
     return random.choice(candidates) if candidates else None
 
@@ -43,6 +45,8 @@ def resolve_target(guild: discord.Guild, member: discord.Member) -> discord.abc.
     """Канал автора команды, если он в голосе, иначе случайный подходящий."""
     if member.voice and member.voice.channel:
         channel = member.voice.channel
+        if isinstance(channel, discord.StageChannel):
+            raise VoiceError("Stage-каналы не поддерживаются. Зайдите в обычный голосовой канал.")
         if _missing_permissions(channel, guild.me):
             raise VoiceError(f"У меня нет прав подключиться и говорить в **{channel.name}**.")
         return channel

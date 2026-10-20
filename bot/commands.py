@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 
 from .checks import ffmpeg_available
-from .config import ConfigError, load_config
+from .config import ConfigError, ConfigReloader
 from .paths import CONFIG_PATH, SOUNDS_DIR
 from .sounds import list_sounds
 from .voice import VoiceError, connect_to, resolve_target
@@ -59,7 +59,7 @@ def register_commands(bot: SoundBot) -> None:
             return
         await interaction.followup.send(f"Подключился к **{vc.channel.name}**.")
 
-    @tree.command(name="start", description="Начать проигрывать случайные звуки")
+    @tree.command(name="start", description="Проигрывать случайные звуки, пока не остановят")
     @app_commands.guild_only()
     async def start(interaction: discord.Interaction) -> None:
         guild = interaction.guild
@@ -68,8 +68,9 @@ def register_commands(bot: SoundBot) -> None:
         if bot.sessions.is_running(guild.id):
             await reply_error(interaction, "Уже играю.")
             return
+        config = ConfigReloader(CONFIG_PATH)
         try:
-            config = load_config(CONFIG_PATH)
+            config.load()
         except ConfigError as e:
             log.error("Ошибка конфига: %s", e)
             await reply_error(interaction, f"Ошибка в config.toml: {e}")
@@ -98,8 +99,8 @@ def register_commands(bot: SoundBot) -> None:
         if bot.sessions.is_running(guild.id):
             await reply_error(interaction, "Уже играю.")
             return
-        plays = bot.sessions.start(guild, vc, config.playback, files)
-        await interaction.followup.send(f"Играю в **{vc.channel.name}**, звуков: {plays}.")
+        bot.sessions.start(guild, vc, config)
+        await interaction.followup.send(f"Играю в **{vc.channel.name}**. Остановить — /stop.")
 
     @tree.command(name="stop", description="Остановить воспроизведение")
     @app_commands.guild_only()
