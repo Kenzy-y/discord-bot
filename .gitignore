@@ -1,0 +1,25 @@
+# Секреты
+.env
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE / ОС
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# Звуковые файлы (сохранять структуру папок short/ и long/ через .gitkeep)
+sounds/*
+!sounds/*/
+!sounds/.gitkeep
+sounds/*/*
+!sounds/*/.gitkeep
+
