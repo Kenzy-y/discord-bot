@@ -357,3 +357,127 @@ def test_ends_when_all_weights_zero(tmp_path, sounds_dir):
 
     asyncio.run(scenario())
     assert rec.played == []
+
+
+def test_short_and_long_sounds_played(tmp_path):
+    sounds = tmp_path / "sounds"
+    short_dir = sounds / "short"
+    long_dir = sounds / "long"
+    short_dir.mkdir(parents=True)
+    long_dir.mkdir(parents=True)
+    (short_dir / "s1.ogg").write_bytes(b"1")
+    (short_dir / "s2.ogg").write_bytes(b"2")
+    (long_dir / "l1.ogg").write_bytes(b"3")
+    (long_dir / "l2.ogg").write_bytes(b"4")
+
+    rec = Recorder()
+
+    async def scenario():
+        manager = make_manager(sounds, rec, seed=42)
+        manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path))
+        await wait_until(lambda: len(rec.played) >= 12)
+        await manager.stop(GUILD.id)
+
+    asyncio.run(scenario())
+
+    played_names = set(rec.played)
+    assert any(name.startswith("s") for name in played_names), played_names
+    assert any(name.startswith("l") for name in played_names), played_names
+
+    # Проверяем, что селекторы для short и long независимы
+    manager = make_manager(sounds, rec)
+    short_sel = manager.selector(GUILD.id, "short")
+    long_sel = manager.selector(GUILD.id, "long")
+    assert short_sel is not long_sel
+
+
+def test_mode_switch_during_session(tmp_path):
+    sounds = tmp_path / "sounds"
+    short_dir = sounds / "short"
+    long_dir = sounds / "long"
+    short_dir.mkdir(parents=True)
+    long_dir.mkdir(parents=True)
+    (short_dir / "s1.ogg").write_bytes(b"1")
+    (short_dir / "s2.ogg").write_bytes(b"2")
+    (long_dir / "l1.ogg").write_bytes(b"3")
+    (long_dir / "l2.ogg").write_bytes(b"4")
+
+    rec = Recorder()
+
+    async def scenario():
+        manager = make_manager(sounds, rec, seed=1)
+        manager.start(GUILD, FakeVoiceClient(), make_reloader(tmp_path))
+
+        # Переключаем в режим 'short'
+        manager.set_mode(GUILD.id, "short")
+        await wait_until(lambda: len(rec.played) >= 5)
+        played_short = rec.played.copy()
+        assert all(name.startswith("s") for name in played_short)
+
+        # Переключаем в режим 'long' прямо во время сессии
+        manager.set_mode(GUILD.id, "long")
+        start_idx = len(rec.played)
+        await wait_until(lambda: len(rec.played) >= start_idx + 5)
+        played_long = rec.played[start_idx:]
+        assert all(name.startswith("l") for name in played_long)
+
+        # Переключаем обратно в 'both'
+        manager.set_mode(GUILD.id, "both")
+        start_idx = len(rec.played)
+        await wait_until(lambda: len(rec.played) >= start_idx + 8)
+        played_both = set(rec.played[start_idx:])
+        assert any(name.startswith("s") for name in played_both)
+        assert any(name.startswith("l") for name in played_both)
+
+        await manager.stop(GUILD.id)
+
+    asyncio.run(scenario())
+
+
+def test_mode_command():
+    from bot.client import SoundBot
+
+    def make_interaction():
+        interaction = MagicMock()
+        interaction.guild = GUILD
+        interaction.response.is_done.return_value = False
+        interaction.response.send_message = AsyncMock()
+        return interaction
+
+    async def scenario():
+        bot = SoundBot(guild_id=None)
+        mode_cmd = bot.tree.get_command("mode").callback
+
+        # 1. Без аргументов: показывает текущий режим (по умолчанию both)
+        first = make_interaction()
+        await mode_cmd(first, None)
+        first.response.send_message.assert_awaited_once()
+        msg = first.response.send_message.call_args[0][0]
+        assert "Текущий режим" in msg and "both" in msg
+
+        # 2. Переключение на short
+        second = make_interaction()
+        await mode_cmd(second, "short")
+        assert bot.sessions.get_mode(GUILD.id) == "short"
+        msg = second.response.send_message.call_args[0][0]
+        assert "Режим переключён на" in msg and "short" in msg
+
+        # 3. Переключение на long
+        third = make_interaction()
+        await mode_cmd(third, "long")
+        assert bot.sessions.get_mode(GUILD.id) == "long"
+        msg = third.response.send_message.call_args[0][0]
+        assert "Режим переключён на" in msg and "long" in msg
+
+        # 4. Переключение на both
+        fourth = make_interaction()
+        await mode_cmd(fourth, "both")
+        assert bot.sessions.get_mode(GUILD.id) == "both"
+        msg = fourth.response.send_message.call_args[0][0]
+        assert "Режим переключён на" in msg and "both" in msg
+
+        await bot.close()
+
+    asyncio.run(scenario())
+
+

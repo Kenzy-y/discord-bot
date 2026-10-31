@@ -84,13 +84,15 @@ class SoundSelector:
         files: Sequence[Path],
         selection: SelectionConfig,
         weights: WeightsConfig,
+        all_files: Sequence[Path] | None = None,
     ) -> Choice | None:
         """Выбирает следующий звук и обновляет состояние. None — выбирать не из чего."""
         files = sorted(files, key=lambda p: p.name)
         names = [p.name for p in files]
         self._sync(names)
 
-        lower_names = {name.lower() for name in names}
+        check_files = all_files if all_files is not None else files
+        lower_names = {p.name.lower() for p in check_files}
         unknown = tuple(n for n in weights.names() if n.lower() not in lower_names)
 
         base = {p.name: weights.weight_for(p.name) for p in files}

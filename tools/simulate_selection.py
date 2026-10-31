@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 from bot.config import ConfigError, load_config  # noqa: E402
 from bot.paths import CONFIG_PATH, SOUNDS_DIR  # noqa: E402
 from bot.selector import SoundSelector  # noqa: E402
-from bot.sounds import list_sounds  # noqa: E402
+from bot.sounds import list_all_sounds  # noqa: E402
 
 
 def max_in_any_window(picked: list[str], window: int) -> int:
@@ -53,7 +53,7 @@ def main() -> int:
     except ConfigError as e:
         print(f"Ошибка в конфиге: {e}", file=sys.stderr)
         return 1
-    files = list_sounds(args.sounds)
+    files = list_all_sounds(args.sounds)
     if not files:
         print(f"В папке {args.sounds} нет звуков (.ogg, .opus, .mp3, .wav).", file=sys.stderr)
         return 1

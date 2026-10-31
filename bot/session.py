@@ -14,7 +14,7 @@ from .checks import probe_method
 from .config import ConfigReloader
 from .paths import SOUNDS_DIR
 from .selector import Choice, SoundSelector
-from .sounds import list_sounds
+from .sounds import get_sounds_by_type
 
 log = logging.getLogger(__name__)
 
@@ -94,21 +94,37 @@ class SessionManager:
         player: Player = play_file,
         sleep: Sleep = asyncio.sleep,
         selector_factory: SelectorFactory = SoundSelector,
+        rng: random.Random | None = None,
     ) -> None:
         self._tasks: dict[int, asyncio.Task[None]] = {}
         # Селекторы переживают завершение сессии, чтобы после /stop и /start
         # не играл сразу тот же звук. Живут, пока запущен бот.
-        self._selectors: dict[int, SoundSelector] = {}
+        # Хранятся по гильдии и типу звука: {guild_id: {sound_type: SoundSelector}}.
+        self._selectors: dict[int, dict[str, SoundSelector]] = {}
+        # Режим воспроизведения по гильдии: 'both', 'short' или 'long'
+        self._modes: dict[int, str] = {}
         self._sounds_dir = sounds_dir
         self._player = player
         self._sleep = sleep
         self._selector_factory = selector_factory
+        self._rng = rng if rng is not None else random.Random()
 
-    def selector(self, guild_id: int) -> SoundSelector:
-        selector = self._selectors.get(guild_id)
-        if selector is None:
-            selector = self._selectors[guild_id] = self._selector_factory()
-        return selector
+    def get_mode(self, guild_id: int) -> str:
+        """Текущий режим воспроизведения для гильдии: 'both', 'short' или 'long'."""
+        return self._modes.get(guild_id, "both")
+
+    def set_mode(self, guild_id: int, mode: str) -> None:
+        """Устанавливает режим воспроизведения ('both', 'short', 'long')."""
+        if mode not in ("both", "short", "long"):
+            raise ValueError(f"Неизвестный режим: {mode!r}")
+        self._modes[guild_id] = mode
+
+    def selector(self, guild_id: int, sound_type: str = "short") -> SoundSelector:
+        """Селектор для гильдии и типа звука (создаётся при первом обращении, переживает сессии)."""
+        by_type = self._selectors.setdefault(guild_id, {})
+        if sound_type not in by_type:
+            by_type[sound_type] = self._selector_factory()
+        return by_type[sound_type]
 
     def is_running(self, guild_id: int) -> bool:
         task = self._tasks.get(guild_id)
@@ -142,8 +158,7 @@ class SessionManager:
         reason = "?"
         number = 0
         failures = 0
-        selector = self.selector(guild.id)
-        logged_window: int | None = None
+        logged_window: dict[str, int | None] = {}
         logged_unknown: tuple[str, ...] = ()
         try:
             while True:
@@ -151,16 +166,57 @@ class SessionManager:
                 # изменения после git pull применялись без перезапуска сессии
                 config = reloader.get()
                 playback = config.playback
-                files = list_sounds(self._sounds_dir)
-                if not files:
+                sounds_by_type = get_sounds_by_type(self._sounds_dir)
+                if not sounds_by_type:
                     reason = "в папке sounds/ не осталось звуков"
                     break
 
-                choice = selector.choose(files, config.selection, config.weights)
+                all_files = [p for files in sounds_by_type.values() for p in files]
+
+                # Фильтруем доступные типы звуков согласно выбранному режиму (both / short / long)
+                mode = self.get_mode(guild.id)
+                if mode == "short":
+                    available_types = [t for t in sounds_by_type if t == "short"]
+                    if not available_types:
+                        reason = "в папке sounds/short/ нет звуков"
+                        break
+                elif mode == "long":
+                    available_types = [t for t in sounds_by_type if t == "long"]
+                    if not available_types:
+                        reason = "в папке sounds/long/ нет звуков"
+                        break
+                else:
+                    available_types = sorted(sounds_by_type.keys())
+
+                # 1. Случайно выбираем тип звука среди доступных
+                chosen_type = self._rng.choice(available_types)
+                files = sounds_by_type[chosen_type]
+
+                # 2. Выбираем звук соответствующего типа через его селектор
+                selector = self.selector(guild.id, chosen_type)
+                choice = selector.choose(files, config.selection, config.weights, all_files=all_files)
                 if choice is None:
-                    reason = "у всех звуков в папке вес 0"
-                    break
-                _log_choice_table(guild, choice)
+                    # Если у выбранного типа все веса 0, пробуем другой доступный тип
+                    other_types = [t for t in available_types if t != chosen_type]
+                    for other_type in other_types:
+                        other_selector = self.selector(guild.id, other_type)
+                        other_choice = other_selector.choose(
+                            sounds_by_type[other_type],
+                            config.selection,
+                            config.weights,
+                            all_files=all_files,
+                        )
+                        if other_choice is not None:
+                            chosen_type = other_type
+                            selector = other_selector
+                            choice = other_choice
+                            files = sounds_by_type[chosen_type]
+                            break
+                    if choice is None:
+                        reason = "у всех звуков в папке вес 0"
+                        break
+
+                _log_choice_table(guild, choice, sound_type=chosen_type)
                 if choice.unknown_weights != logged_unknown:
                     logged_unknown = choice.unknown_weights
                     if logged_unknown:
@@ -168,22 +224,26 @@ class SessionManager:
                             "Сервер %s: в [weights] есть звуки, которых нет в sounds/: %s",
                             guild.name, ", ".join(logged_unknown),
                         )
-                if choice.window != logged_window:
+                if choice.window != logged_window.get(chosen_type):
                     window = config.selection.window
                     if choice.window < window:
                         log.info(
-                            "Сервер %s: звуков мало, окно повторов сужено с %d до %d",
-                            guild.name, window, choice.window,
+                            "Сервер %s: [%s] звуков мало, окно повторов сужено с %d до %d",
+                            guild.name, chosen_type, window, choice.window,
                         )
-                    elif logged_window is not None:
-                        log.info("Сервер %s: окно повторов снова %d", guild.name, choice.window)
-                    logged_window = choice.window
+                    elif logged_window.get(chosen_type) is not None:
+                        log.info(
+                            "Сервер %s: [%s] окно повторов снова %d",
+                            guild.name, chosen_type, choice.window,
+                        )
+                    logged_window[chosen_type] = choice.window
 
                 number += 1
                 path = choice.path
+                type_prefix = f"[{chosen_type}] " if len(available_types) > 1 or chosen_type == "long" else ""
                 log.info(
-                    "Сервер %s: [%d] играю %s (шанс %.0f%%, звуков в папке: %d)",
-                    guild.name, number, path.name, choice.chance * 100, len(files),
+                    "Сервер %s: [%d] играю %s%s (шанс %.0f%%, звуков в папке: %d)",
+                    guild.name, number, type_prefix, path.name, choice.chance * 100, len(files),
                 )
                 try:
                     await self._player(vc, path)
@@ -219,10 +279,11 @@ class SessionManager:
             log.info("Сервер %s: сессия завершена (%s), звуков: %d", guild.name, reason, number)
 
 
-def _log_choice_table(guild: discord.Guild, choice: Choice) -> None:
+def _log_choice_table(guild: discord.Guild, choice: Choice, sound_type: str = "") -> None:
     if not log.isEnabledFor(logging.DEBUG):
         return
-    lines = [f"Сервер {guild.name}: выбор звука, окно {choice.window}"]
+    prefix = f" [{sound_type}]" if sound_type else ""
+    lines = [f"Сервер {guild.name}: выбор звука{prefix}, окно {choice.window}"]
     lines.append(f"  {'звук':<40} {'вес':>5} {'множ.':>6} {'шанс':>6}  разрешён")
     for row in choice.rows:
         lines.append(
