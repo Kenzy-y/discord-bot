@@ -101,11 +101,23 @@ class SessionManager:
         # не играл сразу тот же звук. Живут, пока запущен бот.
         # Хранятся по гильдии и типу звука: {guild_id: {sound_type: SoundSelector}}.
         self._selectors: dict[int, dict[str, SoundSelector]] = {}
+        # Режим воспроизведения по гильдии: 'both', 'short' или 'long'
+        self._modes: dict[int, str] = {}
         self._sounds_dir = sounds_dir
         self._player = player
         self._sleep = sleep
         self._selector_factory = selector_factory
         self._rng = rng if rng is not None else random.Random()
+
+    def get_mode(self, guild_id: int) -> str:
+        """Текущий режим воспроизведения для гильдии: 'both', 'short' или 'long'."""
+        return self._modes.get(guild_id, "both")
+
+    def set_mode(self, guild_id: int, mode: str) -> None:
+        """Устанавливает режим воспроизведения ('both', 'short', 'long')."""
+        if mode not in ("both", "short", "long"):
+            raise ValueError(f"Неизвестный режим: {mode!r}")
+        self._modes[guild_id] = mode
 
     def selector(self, guild_id: int, sound_type: str = "short") -> SoundSelector:
         """Селектор для гильдии и типа звука (создаётся при первом обращении, переживает сессии)."""
@@ -161,8 +173,22 @@ class SessionManager:
 
                 all_files = [p for files in sounds_by_type.values() for p in files]
 
-                # 1. Случайно выбираем тип звука (short/long) среди доступных
-                available_types = sorted(sounds_by_type.keys())
+                # Фильтруем доступные типы звуков согласно выбранному режиму (both / short / long)
+                mode = self.get_mode(guild.id)
+                if mode == "short":
+                    available_types = [t for t in sounds_by_type if t == "short"]
+                    if not available_types:
+                        reason = "в папке sounds/short/ нет звуков"
+                        break
+                elif mode == "long":
+                    available_types = [t for t in sounds_by_type if t == "long"]
+                    if not available_types:
+                        reason = "в папке sounds/long/ нет звуков"
+                        break
+                else:
+                    available_types = sorted(sounds_by_type.keys())
+
+                # 1. Случайно выбираем тип звука среди доступных
                 chosen_type = self._rng.choice(available_types)
                 files = sounds_by_type[chosen_type]
 
