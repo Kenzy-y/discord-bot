@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -11,7 +11,7 @@ from discord import app_commands
 from .checks import ffmpeg_available
 from .config import ConfigError, ConfigReloader
 from .paths import CONFIG_PATH, SOUNDS_DIR
-from .sounds import list_sounds
+from .sounds import get_sounds_by_type, list_all_sounds
 from .voice import VoiceError, connect_to, resolve_target
 
 if TYPE_CHECKING:
@@ -75,9 +75,17 @@ def register_commands(bot: SoundBot) -> None:
             log.error("Ошибка конфига: %s", e)
             await reply_error(interaction, f"Ошибка в config.toml: {e}")
             return
-        files = list_sounds(SOUNDS_DIR)
+        files = list_all_sounds(SOUNDS_DIR)
         if not files:
             await reply_error(interaction, "В папке sounds/ нет звуков.")
+            return
+        sounds_by_type = get_sounds_by_type(SOUNDS_DIR)
+        mode = bot.sessions.get_mode(guild.id)
+        if mode == "short" and "short" not in sounds_by_type:
+            await reply_error(interaction, "В папке sounds/short/ нет звуков.")
+            return
+        if mode == "long" and "long" not in sounds_by_type:
+            await reply_error(interaction, "В папке sounds/long/ нет звуков.")
             return
         if not ffmpeg_available():
             await reply_error(interaction, "FFmpeg не найден на компьютере бота.")
@@ -127,6 +135,37 @@ def register_commands(bot: SoundBot) -> None:
             await vc.disconnect(force=True)
         log.info("Сервер %s: отключился от голосового канала", guild.name)
         await interaction.followup.send("Отключился.")
+
+    @tree.command(name="mode", description="Переключить режим звуков: short, long или both")
+    @app_commands.describe(mode="Режим: short (короткие), long (длинные) или both (все)")
+    @app_commands.guild_only()
+    async def mode_cmd(
+        interaction: discord.Interaction,
+        mode: Literal["both", "short", "long"] | None = None,
+    ) -> None:
+        guild = interaction.guild
+        assert guild is not None
+        mode_labels = {
+            "both": "все звуки (both: short + long)",
+            "short": "только короткие (short)",
+            "long": "только длинные (long)",
+        }
+        if mode is None:
+            current = bot.sessions.get_mode(guild.id)
+            label = mode_labels.get(current, current)
+            await interaction.response.send_message(f"Текущий режим: **{label}**.")
+            return
+
+        bot.sessions.set_mode(guild.id, mode)
+        sounds_by_type = get_sounds_by_type(SOUNDS_DIR)
+        extra = ""
+        if mode == "long" and "long" not in sounds_by_type:
+            extra = "\n⚠️ *В папке sounds/long/ пока нет звуковых файлов.*"
+        elif mode == "short" and "short" not in sounds_by_type:
+            extra = "\n⚠️ *В папке sounds/short/ пока нет звуковых файлов.*"
+
+        log.info("Сервер %s: режим звуков переключён на %s", guild.name, mode)
+        await interaction.response.send_message(f"Режим переключён на: **{mode_labels[mode]}**.{extra}")
 
     @tree.error
     async def on_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:

@@ -7,7 +7,7 @@ import logging
 import shutil
 
 from .paths import SOUNDS_DIR
-from .sounds import list_sounds
+from .sounds import list_all_sounds
 
 log = logging.getLogger(__name__)
 
@@ -35,5 +35,5 @@ def run_startup_checks() -> None:
 
     if not SOUNDS_DIR.is_dir():
         log.warning("Папка %s не найдена — звуков нет.", SOUNDS_DIR)
-    elif not list_sounds(SOUNDS_DIR):
+    elif not list_all_sounds(SOUNDS_DIR):
         log.warning("В папке %s нет звуков (.ogg, .opus, .mp3, .wav).", SOUNDS_DIR)

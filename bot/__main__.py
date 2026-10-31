@@ -10,6 +10,12 @@ import aiohttp
 import discord
 from dotenv import load_dotenv
 
+if __package__ is None or __package__ == "":
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    __package__ = "bot"
+
 from .checks import run_startup_checks
 from .client import SoundBot
 from .paths import ENV_PATH

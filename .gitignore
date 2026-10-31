@@ -15,3 +15,11 @@ __pycache__/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# Звуковые файлы (сохранять структуру папок short/ и long/ через .gitkeep)
+sounds/*
+!sounds/*/
+!sounds/.gitkeep
+sounds/*/*
+!sounds/*/.gitkeep
+
